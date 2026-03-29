@@ -1,0 +1,12 @@
+[package]
+name = "chime"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.6.0", features = ["derive"] }
+rodio = { version = "0.22.2", default-features = false, features = ["playback"] }
+
+[profile.release]
+strip = true
+lto = true
