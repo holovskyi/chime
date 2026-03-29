@@ -10,3 +10,4 @@ rodio = { version = "0.22.2", default-features = false, features = ["playback"] 
 [profile.release]
 strip = true
 lto = true
+opt-level = "z"
