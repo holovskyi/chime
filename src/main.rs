@@ -7,6 +7,11 @@ use clap::{Parser, ValueEnum};
 use rodio::Source;
 use serde::Deserialize;
 
+const DEFAULT_WAVE: Waveform = Waveform::Sine;
+const DEFAULT_VOLUME: f32 = 0.3;
+const DEFAULT_GAP: u64 = 150;
+const DEFAULT_DURATION: u64 = 500;
+
 // --- CLI ---
 
 #[derive(Parser)]
@@ -63,7 +68,11 @@ struct PresetConfig {
 
 fn find_config(explicit: Option<&Path>) -> Option<PathBuf> {
     if let Some(path) = explicit {
-        return if path.exists() { Some(path.to_owned()) } else { None };
+        if path.exists() {
+            return Some(path.to_owned());
+        }
+        eprintln!("error: config file not found: {}", path.display());
+        std::process::exit(1);
     }
 
     // Walk up from current directory
@@ -91,10 +100,20 @@ fn find_config(explicit: Option<&Path>) -> Option<PathBuf> {
 }
 
 fn load_config(path: &Path) -> Config {
-    let content = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("failed to read config {}: {e}", path.display()));
-    toml::from_str(&content)
-        .unwrap_or_else(|e| panic!("failed to parse config {}: {e}", path.display()))
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: failed to read config {}: {e}", path.display());
+            std::process::exit(1);
+        }
+    };
+    match toml::from_str(&content) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: failed to parse config {}: {e}", path.display());
+            std::process::exit(1);
+        }
+    }
 }
 
 // --- Note parsing ---
@@ -105,43 +124,38 @@ struct Note {
 }
 
 fn note_name_to_semitone(name: &str) -> Option<(i32, usize)> {
-    let (semitone, len) = if name.len() >= 2 {
-        match &name[..2] {
-            "C#" | "Db" => (1, 2),
-            "D#" | "Eb" => (3, 2),
-            "F#" | "Gb" => (6, 2),
-            "G#" | "Ab" => (8, 2),
-            "A#" | "Bb" => (10, 2),
-            _ => match &name[..1] {
-                "C" => (0, 1),
-                "D" => (2, 1),
-                "E" => (4, 1),
-                "F" => (5, 1),
-                "G" => (7, 1),
-                "A" => (9, 1),
-                "B" => (11, 1),
-                _ => return None,
-            },
+    // Try two-char accidentals first
+    if name.len() >= 2 {
+        let semitone = match &name[..2] {
+            "C#" | "Db" => Some(1),
+            "D#" | "Eb" => Some(3),
+            "F#" | "Gb" => Some(6),
+            "G#" | "Ab" => Some(8),
+            "A#" | "Bb" => Some(10),
+            _ => None,
+        };
+        if let Some(s) = semitone {
+            return Some((s, 2));
         }
-    } else {
-        match &name[..1] {
-            "C" => (0, 1),
-            "D" => (2, 1),
-            "E" => (4, 1),
-            "F" => (5, 1),
-            "G" => (7, 1),
-            "A" => (9, 1),
-            "B" => (11, 1),
-            _ => return None,
-        }
+    }
+    // Single-char natural notes
+    let s = match name.as_bytes().first()? {
+        b'C' => 0,
+        b'D' => 2,
+        b'E' => 4,
+        b'F' => 5,
+        b'G' => 7,
+        b'A' => 9,
+        b'B' => 11,
+        _ => return None,
     };
-    Some((semitone, len))
+    Some((s, 1))
 }
 
 fn parse_note(s: &str) -> Note {
     let (tone, duration_ms) = match s.split_once(':') {
         Some((t, d)) => (t, d.parse::<u64>().expect("invalid duration")),
-        None => (s, 500),
+        None => (s, DEFAULT_DURATION),
     };
 
     // Try parsing as raw frequency
@@ -245,30 +259,33 @@ struct ResolvedPreset {
 
 fn builtin_preset(name: &str) -> Option<ResolvedPreset> {
     let (notes, wave) = match name {
-        "start" => (vec!["C5:500", "G5:500"], Waveform::Sine),
-        "goal" => (vec!["E5:500", "A5:500"], Waveform::Sine),
-        "success" => (vec!["C5:500", "E5:500", "G5:500"], Waveform::Sine),
+        "start" => (vec!["C5:500", "G5:500"], DEFAULT_WAVE),
+        "goal" => (vec!["E5:500", "A5:500"], DEFAULT_WAVE),
+        "success" => (vec!["C5:500", "E5:500", "G5:500"], DEFAULT_WAVE),
         "fail" => (vec!["G4:500", "Eb4:500", "C4:500"], Waveform::Triangle),
-        "reminder" => (vec!["A4:500"], Waveform::Sine),
+        "reminder" => (vec!["A4:500"], DEFAULT_WAVE),
         _ => return None,
     };
     Some(ResolvedPreset {
         notes: notes.into_iter().map(String::from).collect(),
         wave,
-        volume: 0.3,
-        gap: 150,
+        volume: DEFAULT_VOLUME,
+        gap: DEFAULT_GAP,
     })
 }
 
 fn resolve_preset(name: &str, config: Option<&Config>) -> ResolvedPreset {
-    // Config presets take priority over built-in
     if let Some(cfg) = config {
         if let Some(preset) = cfg.presets.get(name) {
+            if preset.notes.is_empty() {
+                eprintln!("error: preset '{name}' has no notes");
+                std::process::exit(1);
+            }
             return ResolvedPreset {
                 notes: preset.notes.clone(),
-                wave: preset.wave.unwrap_or(Waveform::Sine),
-                volume: preset.volume.unwrap_or(0.3),
-                gap: preset.gap.unwrap_or(150),
+                wave: preset.wave.unwrap_or(DEFAULT_WAVE),
+                volume: preset.volume.unwrap_or(DEFAULT_VOLUME),
+                gap: preset.gap.unwrap_or(DEFAULT_GAP),
             };
         }
     }
@@ -286,28 +303,30 @@ fn main() {
 
     let config = find_config(cli.config.as_deref()).map(|p| load_config(&p));
 
-    let (note_strs, wave, volume, gap) = if let Some(ref preset_name) = cli.preset {
-        let preset = resolve_preset(preset_name, config.as_ref());
-        (
-            preset.notes,
-            cli.wave.unwrap_or(preset.wave),
-            cli.volume.unwrap_or(preset.volume),
-            cli.gap.unwrap_or(preset.gap),
-        )
+    let base = if let Some(ref preset_name) = cli.preset {
+        resolve_preset(preset_name, config.as_ref())
     } else {
         if cli.notes.is_empty() {
             eprintln!("error: provide notes or --preset");
             std::process::exit(1);
         }
-        (
-            cli.notes,
-            cli.wave.unwrap_or(Waveform::Sine),
-            cli.volume.unwrap_or(0.3),
-            cli.gap.unwrap_or(150),
-        )
+        ResolvedPreset {
+            notes: cli.notes,
+            wave: DEFAULT_WAVE,
+            volume: DEFAULT_VOLUME,
+            gap: DEFAULT_GAP,
+        }
     };
 
-    let notes: Vec<Note> = note_strs.iter().map(|s| parse_note(s)).collect();
+    let wave = cli.wave.unwrap_or(base.wave);
+    let volume = cli.volume.unwrap_or(base.volume);
+    let gap = cli.gap.unwrap_or(base.gap);
+
+    if !(0.0..=1.0).contains(&volume) {
+        eprintln!("error: volume must be between 0.0 and 1.0, got {volume}");
+        std::process::exit(1);
+    }
+    let notes: Vec<Note> = base.notes.iter().map(|s| parse_note(s)).collect();
 
     let mut handle = rodio::DeviceSinkBuilder::open_default_sink()
         .expect("failed to open audio output");
