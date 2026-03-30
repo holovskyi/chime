@@ -1,8 +1,11 @@
+use std::collections::HashMap;
 use std::num::NonZero;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
 use rodio::Source;
+use serde::Deserialize;
 
 // --- CLI ---
 
@@ -13,23 +16,28 @@ struct Cli {
     notes: Vec<String>,
 
     /// Waveform shape
-    #[arg(long, default_value = "sine")]
-    wave: Waveform,
+    #[arg(long)]
+    wave: Option<Waveform>,
 
     /// Volume 0.0–1.0
-    #[arg(long, default_value_t = 0.3)]
-    volume: f32,
+    #[arg(long)]
+    volume: Option<f32>,
 
     /// Gap between note starts (ms)
-    #[arg(long, default_value_t = 150)]
-    gap: u64,
+    #[arg(long)]
+    gap: Option<u64>,
 
     /// Named preset instead of notes
     #[arg(long)]
-    preset: Option<Preset>,
+    preset: Option<String>,
+
+    /// Path to config file
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, ValueEnum, Deserialize)]
+#[serde(rename_all = "lowercase")]
 enum Waveform {
     Sine,
     Triangle,
@@ -37,13 +45,56 @@ enum Waveform {
     Sawtooth,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
-enum Preset {
-    Start,
-    Success,
-    Fail,
-    Goal,
-    Reminder,
+// --- Config ---
+
+#[derive(Deserialize, Default)]
+struct Config {
+    #[serde(default)]
+    presets: HashMap<String, PresetConfig>,
+}
+
+#[derive(Deserialize)]
+struct PresetConfig {
+    notes: Vec<String>,
+    wave: Option<Waveform>,
+    volume: Option<f32>,
+    gap: Option<u64>,
+}
+
+fn find_config(explicit: Option<&Path>) -> Option<PathBuf> {
+    if let Some(path) = explicit {
+        return if path.exists() { Some(path.to_owned()) } else { None };
+    }
+
+    // Walk up from current directory
+    if let Ok(mut dir) = std::env::current_dir() {
+        loop {
+            let candidate = dir.join(".chime.toml");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+    }
+
+    // Platform config directory
+    if let Some(config_dir) = dirs::config_dir() {
+        let candidate = config_dir.join("chime").join("config.toml");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn load_config(path: &Path) -> Config {
+    let content = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("failed to read config {}: {e}", path.display()));
+    toml::from_str(&content)
+        .unwrap_or_else(|e| panic!("failed to parse config {}: {e}", path.display()))
 }
 
 // --- Note parsing ---
@@ -185,14 +236,47 @@ impl Source for ToneSource {
 
 // --- Presets ---
 
-fn get_preset(preset: Preset) -> (Vec<&'static str>, Waveform) {
-    match preset {
-        Preset::Start => (vec!["C5:500", "G5:500"], Waveform::Sine),
-        Preset::Goal => (vec!["E5:500", "A5:500"], Waveform::Sine),
-        Preset::Success => (vec!["C5:500", "E5:500", "G5:500"], Waveform::Sine),
-        Preset::Fail => (vec!["G4:500", "Eb4:500", "C4:500"], Waveform::Triangle),
-        Preset::Reminder => (vec!["A4:500"], Waveform::Sine),
+struct ResolvedPreset {
+    notes: Vec<String>,
+    wave: Waveform,
+    volume: f32,
+    gap: u64,
+}
+
+fn builtin_preset(name: &str) -> Option<ResolvedPreset> {
+    let (notes, wave) = match name {
+        "start" => (vec!["C5:500", "G5:500"], Waveform::Sine),
+        "goal" => (vec!["E5:500", "A5:500"], Waveform::Sine),
+        "success" => (vec!["C5:500", "E5:500", "G5:500"], Waveform::Sine),
+        "fail" => (vec!["G4:500", "Eb4:500", "C4:500"], Waveform::Triangle),
+        "reminder" => (vec!["A4:500"], Waveform::Sine),
+        _ => return None,
+    };
+    Some(ResolvedPreset {
+        notes: notes.into_iter().map(String::from).collect(),
+        wave,
+        volume: 0.3,
+        gap: 150,
+    })
+}
+
+fn resolve_preset(name: &str, config: Option<&Config>) -> ResolvedPreset {
+    // Config presets take priority over built-in
+    if let Some(cfg) = config {
+        if let Some(preset) = cfg.presets.get(name) {
+            return ResolvedPreset {
+                notes: preset.notes.clone(),
+                wave: preset.wave.unwrap_or(Waveform::Sine),
+                volume: preset.volume.unwrap_or(0.3),
+                gap: preset.gap.unwrap_or(150),
+            };
+        }
     }
+
+    builtin_preset(name).unwrap_or_else(|| {
+        eprintln!("error: unknown preset '{name}'");
+        std::process::exit(1);
+    })
 }
 
 // --- Main ---
@@ -200,15 +284,27 @@ fn get_preset(preset: Preset) -> (Vec<&'static str>, Waveform) {
 fn main() {
     let cli = Cli::parse();
 
-    let (note_strs, waveform) = if let Some(preset) = cli.preset {
-        let (notes, wave) = get_preset(preset);
-        (notes.into_iter().map(String::from).collect(), wave)
+    let config = find_config(cli.config.as_deref()).map(|p| load_config(&p));
+
+    let (note_strs, wave, volume, gap) = if let Some(ref preset_name) = cli.preset {
+        let preset = resolve_preset(preset_name, config.as_ref());
+        (
+            preset.notes,
+            cli.wave.unwrap_or(preset.wave),
+            cli.volume.unwrap_or(preset.volume),
+            cli.gap.unwrap_or(preset.gap),
+        )
     } else {
         if cli.notes.is_empty() {
             eprintln!("error: provide notes or --preset");
             std::process::exit(1);
         }
-        (cli.notes, cli.wave)
+        (
+            cli.notes,
+            cli.wave.unwrap_or(Waveform::Sine),
+            cli.volume.unwrap_or(0.3),
+            cli.gap.unwrap_or(150),
+        )
     };
 
     let notes: Vec<Note> = note_strs.iter().map(|s| parse_note(s)).collect();
@@ -220,12 +316,12 @@ fn main() {
 
     let mut last_duration_ms = 0u64;
     for (i, note) in notes.iter().enumerate() {
-        let source = ToneSource::new(note.freq, note.duration_ms, waveform, cli.volume);
+        let source = ToneSource::new(note.freq, note.duration_ms, wave, volume);
         mixer.add(source);
 
         last_duration_ms = note.duration_ms;
         if i < notes.len() - 1 {
-            std::thread::sleep(Duration::from_millis(cli.gap));
+            std::thread::sleep(Duration::from_millis(gap));
         }
     }
 
