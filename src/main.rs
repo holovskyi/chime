@@ -18,7 +18,7 @@ const CHANNELS: NonZero<u16> = NonZero::new(1).unwrap();
 // --- CLI ---
 
 #[derive(Parser)]
-#[command(about = "Play musical tones through the sound card")]
+#[command(about = "Play musical tones through the sound card", version)]
 struct Cli {
     /// Notes: C5:150 Eb4:300 440:200 (name/freq, optional :duration_ms)
     notes: Vec<String>,
