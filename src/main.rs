@@ -11,6 +11,9 @@ const DEFAULT_WAVE: Waveform = Waveform::Sine;
 const DEFAULT_VOLUME: f32 = 0.3;
 const DEFAULT_GAP: u64 = 150;
 const DEFAULT_DURATION: u64 = 500;
+const SAMPLE_RATE: u32 = 48000;
+const SAMPLE_RATE_NZ: NonZero<u32> = NonZero::new(SAMPLE_RATE).unwrap();
+const CHANNELS: NonZero<u16> = NonZero::new(1).unwrap();
 
 // --- CLI ---
 
@@ -71,8 +74,7 @@ fn find_config(explicit: Option<&Path>) -> Option<PathBuf> {
         if path.exists() {
             return Some(path.to_owned());
         }
-        eprintln!("error: config file not found: {}", path.display());
-        std::process::exit(1);
+        fatal(&format!("config file not found: {}", path.display()));
     }
 
     // Walk up from current directory
@@ -103,15 +105,13 @@ fn load_config(path: &Path) -> Config {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("error: failed to read config {}: {e}", path.display());
-            std::process::exit(1);
+            fatal(&format!("failed to read config {}: {e}", path.display()));
         }
     };
     match toml::from_str(&content) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("error: failed to parse config {}: {e}", path.display());
-            std::process::exit(1);
+            fatal(&format!("failed to parse config {}: {e}", path.display()));
         }
     }
 }
@@ -152,23 +152,35 @@ fn note_name_to_semitone(name: &str) -> Option<(i32, usize)> {
     Some((s, 1))
 }
 
+fn fatal(msg: &str) -> ! {
+    eprintln!("error: {msg}");
+    std::process::exit(1);
+}
+
 fn parse_note(s: &str) -> Note {
     let (tone, duration_ms) = match s.split_once(':') {
-        Some((t, d)) => (t, d.parse::<u64>().expect("invalid duration")),
+        Some((t, d)) => (
+            t,
+            d.parse::<u64>()
+                .unwrap_or_else(|_| fatal(&format!("invalid duration in '{s}'"))),
+        ),
         None => (s, DEFAULT_DURATION),
     };
 
     // Try parsing as raw frequency
     if let Ok(freq) = tone.parse::<f32>() {
+        if !freq.is_finite() || freq <= 0.0 {
+            fatal(&format!("frequency must be a positive number, got '{tone}'"));
+        }
         return Note { freq, duration_ms };
     }
 
     // Parse note name + octave
     let (semitone, name_len) =
-        note_name_to_semitone(tone).unwrap_or_else(|| panic!("unknown note: {tone}"));
+        note_name_to_semitone(tone).unwrap_or_else(|| fatal(&format!("unknown note: '{tone}'")));
     let octave: i32 = tone[name_len..]
         .parse()
-        .unwrap_or_else(|_| panic!("invalid octave in: {tone}"));
+        .unwrap_or_else(|_| fatal(&format!("invalid octave in '{tone}'")));
 
     // A4 = 440Hz, semitone 9 in octave 4
     let semitones_from_a4 = (octave - 4) * 12 + semitone - 9;
@@ -178,8 +190,6 @@ fn parse_note(s: &str) -> Note {
 }
 
 // --- Tone source ---
-
-const SAMPLE_RATE: u32 = 48000;
 
 struct ToneSource {
     sample_i: u32,
@@ -230,15 +240,15 @@ impl Iterator for ToneSource {
 
 impl Source for ToneSource {
     fn current_span_len(&self) -> Option<usize> {
-        Some((self.duration_samples - self.sample_i) as usize)
+        Some(self.duration_samples.saturating_sub(self.sample_i) as usize)
     }
 
     fn channels(&self) -> NonZero<u16> {
-        NonZero::new(1).unwrap()
+        CHANNELS
     }
 
     fn sample_rate(&self) -> NonZero<u32> {
-        NonZero::new(SAMPLE_RATE).unwrap()
+        SAMPLE_RATE_NZ
     }
 
     fn total_duration(&self) -> Option<Duration> {
@@ -259,11 +269,11 @@ struct ResolvedPreset {
 
 fn builtin_preset(name: &str) -> Option<ResolvedPreset> {
     let (notes, wave) = match name {
-        "start" => (vec!["C5:500", "G5:500"], DEFAULT_WAVE),
-        "goal" => (vec!["E5:500", "A5:500"], DEFAULT_WAVE),
-        "success" => (vec!["C5:500", "E5:500", "G5:500"], DEFAULT_WAVE),
-        "fail" => (vec!["G4:500", "Eb4:500", "C4:500"], Waveform::Triangle),
-        "reminder" => (vec!["A4:500"], DEFAULT_WAVE),
+        "start" => (vec!["C5", "G5"], DEFAULT_WAVE),
+        "goal" => (vec!["E5", "A5"], DEFAULT_WAVE),
+        "success" => (vec!["C5", "E5", "G5"], DEFAULT_WAVE),
+        "fail" => (vec!["G4", "Eb4", "C4"], Waveform::Triangle),
+        "reminder" => (vec!["A4"], DEFAULT_WAVE),
         _ => return None,
     };
     Some(ResolvedPreset {
@@ -278,8 +288,7 @@ fn resolve_preset(name: &str, config: Option<&Config>) -> ResolvedPreset {
     if let Some(cfg) = config {
         if let Some(preset) = cfg.presets.get(name) {
             if preset.notes.is_empty() {
-                eprintln!("error: preset '{name}' has no notes");
-                std::process::exit(1);
+                fatal(&format!("preset '{name}' has no notes"));
             }
             return ResolvedPreset {
                 notes: preset.notes.clone(),
@@ -290,10 +299,7 @@ fn resolve_preset(name: &str, config: Option<&Config>) -> ResolvedPreset {
         }
     }
 
-    builtin_preset(name).unwrap_or_else(|| {
-        eprintln!("error: unknown preset '{name}'");
-        std::process::exit(1);
-    })
+    builtin_preset(name).unwrap_or_else(|| fatal(&format!("unknown preset '{name}'")))
 }
 
 // --- Main ---
@@ -303,12 +309,15 @@ fn main() {
 
     let config = find_config(cli.config.as_deref()).map(|p| load_config(&p));
 
+    if cli.preset.is_some() && !cli.notes.is_empty() {
+        fatal("cannot use both --preset and positional notes");
+    }
+
     let base = if let Some(ref preset_name) = cli.preset {
         resolve_preset(preset_name, config.as_ref())
     } else {
         if cli.notes.is_empty() {
-            eprintln!("error: provide notes or --preset");
-            std::process::exit(1);
+            fatal("provide notes or --preset");
         }
         ResolvedPreset {
             notes: cli.notes,
@@ -323,8 +332,7 @@ fn main() {
     let gap = cli.gap.unwrap_or(base.gap);
 
     if !(0.0..=1.0).contains(&volume) {
-        eprintln!("error: volume must be between 0.0 and 1.0, got {volume}");
-        std::process::exit(1);
+        fatal(&format!("volume must be between 0.0 and 1.0, got {volume}"));
     }
     let notes: Vec<Note> = base.notes.iter().map(|s| parse_note(s)).collect();
 

@@ -37,7 +37,7 @@ chime 440:200 880:200
 ```bash
 chime --preset start      # C5, G5 — start signal
 chime --preset success    # C5, E5, G5 — task completed
-chime --preset fail       # G4, Eb4, C4 (triangle) — something went wrong
+chime --preset fail       # G4, Eb4, C4 (triangle wave) — something went wrong
 chime --preset goal       # E5, A5 — goal reached
 chime --preset reminder   # A4 — notification
 ```
@@ -50,6 +50,7 @@ chime --preset reminder   # A4 — notification
 | `--volume` | 0.3     | Volume 0.0-1.0                 |
 | `--gap`    | 150     | Gap between note starts (ms)   |
 | `--preset` | -       | Named preset instead of notes  |
+| `--config` | -       | Explicit path to config file   |
 
 ### Note format
 
@@ -57,6 +58,29 @@ chime --preset reminder   # A4 — notification
 - Supported: C, C#, Db, D, D#, Eb, E, F, F#, Gb, G, G#, Ab, A, A#, Bb, B
 - Duration after `:` in ms (optional, default 500ms)
 - Raw frequency: `440:200`
+
+## Config file
+
+Chime looks for a TOML config file to load custom presets. Discovery order (first found wins):
+
+1. `--config <path>` — explicit path
+2. `.chime.toml` — walk up from current directory through parents
+3. Platform config dir — `%APPDATA%\chime\config.toml` (Windows), `~/.config/chime/config.toml` (Linux/macOS)
+
+Example config:
+
+```toml
+[presets.my-chord]
+notes = ["A4:200", "C5:200", "E5:200", "A5:400"]
+wave = "triangle"
+volume = 0.5
+gap = 100
+
+[presets.success]   # overrides the built-in preset
+notes = ["C6:300", "E6:300", "G6:300"]
+```
+
+Preset fields: `notes` (required), `wave` / `volume` / `gap` (optional, defaults apply). CLI flags always override config values.
 
 ## Claude Code hooks integration
 
