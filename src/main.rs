@@ -162,7 +162,7 @@ fn parse_note(s: &str) -> Note {
         Some((t, d)) => (
             t,
             d.parse::<u64>()
-                .unwrap_or_else(|_| fatal(&format!("invalid duration in '{s}'"))),
+                .unwrap_or_else(|e| fatal(&format!("invalid duration in '{s}': {e}"))),
         ),
         None => (s, DEFAULT_DURATION),
     };
@@ -180,7 +180,7 @@ fn parse_note(s: &str) -> Note {
         note_name_to_semitone(tone).unwrap_or_else(|| fatal(&format!("unknown note: '{tone}'")));
     let octave: i32 = tone[name_len..]
         .parse()
-        .unwrap_or_else(|_| fatal(&format!("invalid octave in '{tone}'")));
+        .unwrap_or_else(|e| fatal(&format!("invalid octave in '{tone}': {e}")));
 
     // A4 = 440Hz, semitone 9 in octave 4
     let semitones_from_a4 = (octave - 4) * 12 + semitone - 9;
@@ -341,17 +341,24 @@ fn main() {
     handle.log_on_drop(false);
     let mixer = handle.mixer();
 
-    let mut last_duration_ms = 0u64;
+    let mut elapsed = 0u64;
+    let mut max_end = 0u64;
     for (i, note) in notes.iter().enumerate() {
         let source = ToneSource::new(note.freq, note.duration_ms, wave, volume);
         mixer.add(source);
 
-        last_duration_ms = note.duration_ms;
+        let note_end = elapsed + note.duration_ms;
+        if note_end > max_end {
+            max_end = note_end;
+        }
+
         if i < notes.len() - 1 {
             std::thread::sleep(Duration::from_millis(gap));
+            elapsed += gap;
         }
     }
 
-    // Wait for the last note to finish
-    std::thread::sleep(Duration::from_millis(last_duration_ms));
+    // Wait for the longest-running note to finish
+    let remaining = max_end.saturating_sub(elapsed);
+    std::thread::sleep(Duration::from_millis(remaining));
 }
