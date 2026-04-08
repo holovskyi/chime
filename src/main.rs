@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
 use rodio::Source;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const DEFAULT_WAVE: Waveform = Waveform::Sine;
 const DEFAULT_VOLUME: f32 = 0.3;
@@ -56,7 +56,7 @@ struct Cli {
     dump_config: bool,
 }
 
-#[derive(Clone, Copy, ValueEnum, Deserialize)]
+#[derive(Clone, Copy, ValueEnum, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum Waveform {
     Sine,
@@ -65,20 +65,14 @@ enum Waveform {
     Sawtooth,
 }
 
-impl Waveform {
-    fn as_str(self) -> &'static str {
-        match self {
+impl std::fmt::Display for Waveform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
             Waveform::Sine => "sine",
             Waveform::Triangle => "triangle",
             Waveform::Square => "square",
             Waveform::Sawtooth => "sawtooth",
-        }
-    }
-}
-
-impl std::fmt::Display for Waveform {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
+        })
     }
 }
 
@@ -90,11 +84,14 @@ struct Config {
     presets: HashMap<String, PresetConfig>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct PresetConfig {
     notes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     wave: Option<Waveform>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     volume: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     gap: Option<u64>,
 }
 
@@ -226,16 +223,20 @@ struct ToneSource {
     duration_samples: u32,
     waveform: Waveform,
     volume: f32,
+    decay_rate: f32,
 }
 
 impl ToneSource {
     fn new(freq: f32, duration_ms: u64, waveform: Waveform, volume: f32) -> Self {
+        let duration_samples = (SAMPLE_RATE as u64 * duration_ms / 1000) as u32;
+        let duration_secs = duration_samples as f32 / SAMPLE_RATE as f32;
         Self {
             sample_i: 0,
             frequency: freq,
-            duration_samples: (SAMPLE_RATE as u64 * duration_ms / 1000) as u32,
+            duration_samples,
             waveform,
             volume,
+            decay_rate: 5.0 / duration_secs,
         }
     }
 }
@@ -253,14 +254,15 @@ impl Iterator for ToneSource {
 
         let wave = match self.waveform {
             Waveform::Sine => phase.sin(),
-            Waveform::Triangle => 2.0 / std::f32::consts::PI * phase.sin().asin(),
+            Waveform::Triangle => {
+                let p = self.frequency * t;
+                4.0 * (p - (p + 0.75).floor() + 0.25).abs() - 1.0
+            }
             Waveform::Square => phase.sin().signum(),
             Waveform::Sawtooth => 2.0 * (self.frequency * t - (self.frequency * t + 0.5).floor()),
         };
 
-        // Exponential decay envelope
-        let duration_secs = self.duration_samples as f32 / SAMPLE_RATE as f32;
-        let envelope = (-5.0 * t / duration_secs).exp();
+        let envelope = (-self.decay_rate * t).exp();
 
         self.sample_i += 1;
         Some(wave * self.volume * envelope)
@@ -296,6 +298,17 @@ struct ResolvedPreset {
     gap: u64,
 }
 
+impl Default for ResolvedPreset {
+    fn default() -> Self {
+        Self {
+            notes: Vec::new(),
+            wave: DEFAULT_WAVE,
+            volume: DEFAULT_VOLUME,
+            gap: DEFAULT_GAP,
+        }
+    }
+}
+
 fn builtin_preset(name: &str) -> Option<ResolvedPreset> {
     let (notes, wave) = match name {
         "start" => (vec!["C5", "G5"], DEFAULT_WAVE),
@@ -308,24 +321,23 @@ fn builtin_preset(name: &str) -> Option<ResolvedPreset> {
     Some(ResolvedPreset {
         notes: notes.into_iter().map(String::from).collect(),
         wave,
-        volume: DEFAULT_VOLUME,
-        gap: DEFAULT_GAP,
+        ..Default::default()
     })
 }
 
 fn resolve_preset(name: &str, config: Option<&Config>) -> ResolvedPreset {
-    if let Some(cfg) = config {
-        if let Some(preset) = cfg.presets.get(name) {
-            if preset.notes.is_empty() {
-                fatal(&format!("preset '{name}' has no notes"));
-            }
-            return ResolvedPreset {
-                notes: preset.notes.clone(),
-                wave: preset.wave.unwrap_or(DEFAULT_WAVE),
-                volume: preset.volume.unwrap_or(DEFAULT_VOLUME),
-                gap: preset.gap.unwrap_or(DEFAULT_GAP),
-            };
+    if let Some(cfg) = config
+        && let Some(preset) = cfg.presets.get(name)
+    {
+        if preset.notes.is_empty() {
+            fatal(&format!("preset '{name}' has no notes"));
         }
+        return ResolvedPreset {
+            notes: preset.notes.clone(),
+            wave: preset.wave.unwrap_or(DEFAULT_WAVE),
+            volume: preset.volume.unwrap_or(DEFAULT_VOLUME),
+            gap: preset.gap.unwrap_or(DEFAULT_GAP),
+        };
     }
 
     builtin_preset(name).unwrap_or_else(|| fatal(&format!("unknown preset '{name}'")))
@@ -348,27 +360,23 @@ fn main() {
 
     let config = config_path.map(|p| load_config(&p));
 
-    if cli.preset.is_some() && !cli.notes.is_empty() {
-        fatal("cannot use both --preset and positional notes");
-    }
-
-    let base = if let Some(ref preset_name) = cli.preset {
-        resolve_preset(preset_name, config.as_ref())
-    } else {
-        if cli.notes.is_empty() {
-            fatal("provide notes or --preset");
-        }
-        ResolvedPreset {
+    let base = match (cli.preset.as_deref(), cli.notes.is_empty()) {
+        (Some(_), false) => fatal("cannot use both --preset and positional notes"),
+        (Some(name), true) => resolve_preset(name, config.as_ref()),
+        (None, false) => ResolvedPreset {
             notes: cli.notes,
-            wave: DEFAULT_WAVE,
-            volume: DEFAULT_VOLUME,
-            gap: DEFAULT_GAP,
-        }
+            ..Default::default()
+        },
+        (None, true) => fatal("provide notes or --preset"),
     };
 
     let wave = cli.wave.unwrap_or(base.wave);
     let volume = cli.volume.unwrap_or(base.volume);
     let gap = cli.gap.unwrap_or(base.gap);
+
+    if !(0.0..=1.0).contains(&volume) {
+        fatal(&format!("volume must be between 0.0 and 1.0, got {volume}"));
+    }
 
     if cli.show_effective {
         println!("notes:  {}", base.notes.join(" "));
@@ -380,17 +388,15 @@ fn main() {
 
     if cli.dump_config {
         let preset_name = cli.preset.as_deref().unwrap_or("current");
-        println!("[presets.{preset_name}]");
-        let notes_toml: Vec<String> = base.notes.iter().map(|n| format!("\"{n}\"")).collect();
-        println!("notes = [{}]", notes_toml.join(", "));
-        println!("wave = \"{wave}\"");
-        println!("volume = {volume}");
-        println!("gap = {gap}");
+        let preset = PresetConfig {
+            notes: base.notes,
+            wave: Some(wave),
+            volume: Some(volume),
+            gap: Some(gap),
+        };
+        let wrapper = HashMap::from([("presets", HashMap::from([(preset_name, preset)]))]);
+        print!("{}", toml::to_string_pretty(&wrapper).expect("failed to serialize config"));
         return;
-    }
-
-    if !(0.0..=1.0).contains(&volume) {
-        fatal(&format!("volume must be between 0.0 and 1.0, got {volume}"));
     }
     let notes: Vec<Note> = base.notes.iter().map(|s| parse_note(s)).collect();
 
