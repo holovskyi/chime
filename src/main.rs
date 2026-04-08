@@ -148,6 +148,22 @@ struct PresetConfig {
     gap: Option<u64>,
 }
 
+fn config_search_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(mut dir) = std::env::current_dir() {
+        loop {
+            paths.push(dir.join(".chime.toml"));
+            if !dir.pop() {
+                break;
+            }
+        }
+    }
+    if let Some(config_dir) = dirs::config_dir() {
+        paths.push(config_dir.join("chime").join("config.toml"));
+    }
+    paths
+}
+
 fn find_config(explicit: Option<&Path>) -> Option<PathBuf> {
     if let Some(path) = explicit {
         if path.exists() {
@@ -156,28 +172,7 @@ fn find_config(explicit: Option<&Path>) -> Option<PathBuf> {
         fatal(&format!("config file not found: {}", path.display()));
     }
 
-    // Walk up from current directory
-    if let Ok(mut dir) = std::env::current_dir() {
-        loop {
-            let candidate = dir.join(".chime.toml");
-            if candidate.exists() {
-                return Some(candidate);
-            }
-            if !dir.pop() {
-                break;
-            }
-        }
-    }
-
-    // Platform config directory
-    if let Some(config_dir) = dirs::config_dir() {
-        let candidate = config_dir.join("chime").join("config.toml");
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-
-    None
+    config_search_paths().into_iter().find(|p| p.exists())
 }
 
 fn load_config(path: &Path) -> Config {
@@ -439,8 +434,15 @@ fn main() {
     let config_path = find_config(cli.config.as_deref());
 
     if cli.show_config {
+        if cli.config.is_none() {
+            println!("search paths:");
+            for path in config_search_paths() {
+                println!("  {}", path.display());
+            }
+            println!();
+        }
         match &config_path {
-            Some(p) => println!("{}", p.display()),
+            Some(p) => println!("loaded: {}", p.display()),
             None => println!("no config file found"),
         }
         return;
