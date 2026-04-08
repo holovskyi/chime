@@ -87,8 +87,20 @@ impl std::fmt::Display for Waveform {
 
 // --- Config ---
 
+#[derive(Deserialize, Serialize, Default, Clone)]
+struct Defaults {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wave: Option<Waveform>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    volume: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gap: Option<u64>,
+}
+
 #[derive(Deserialize, Default)]
 struct Config {
+    #[serde(default)]
+    defaults: Defaults,
     #[serde(default)]
     presets: HashMap<String, PresetConfig>,
 }
@@ -139,8 +151,14 @@ fn find_config(explicit: Option<&Path>) -> Option<PathBuf> {
 fn load_config(path: &Path) -> Config {
     let content = std::fs::read_to_string(path)
         .unwrap_or_else(|e| fatal(&format!("failed to read config {}: {e}", path.display())));
-    toml::from_str(&content)
-        .unwrap_or_else(|e| fatal(&format!("failed to parse config {}: {e}", path.display())))
+    let config: Config = toml::from_str(&content)
+        .unwrap_or_else(|e| fatal(&format!("failed to parse config {}: {e}", path.display())));
+    if let Some(v) = config.defaults.volume
+        && !(0.0..=1.0).contains(&v)
+    {
+        fatal(&format!("defaults: volume must be between 0.0 and 1.0, got {v}"));
+    }
+    config
 }
 
 // --- Note parsing ---
@@ -328,16 +346,16 @@ fn resolve_preset(name: &str, config: Option<&Config>) -> ResolvedPreset {
         if preset.notes.is_empty() {
             fatal(&format!("preset '{name}' has no notes"));
         }
-        if let Some(v) = preset.volume
-            && !(0.0..=1.0).contains(&v)
-        {
-            fatal(&format!("preset '{name}': volume must be between 0.0 and 1.0, got {v}"));
+        let defaults = &cfg.defaults;
+        let volume = preset.volume.or(defaults.volume).unwrap_or(DEFAULT_VOLUME);
+        if !(0.0..=1.0).contains(&volume) {
+            fatal(&format!("preset '{name}': volume must be between 0.0 and 1.0, got {volume}"));
         }
         return ResolvedPreset {
             notes: preset.notes.clone(),
-            wave: preset.wave.unwrap_or(DEFAULT_WAVE),
-            volume: preset.volume.unwrap_or(DEFAULT_VOLUME),
-            gap: preset.gap.unwrap_or(DEFAULT_GAP),
+            wave: preset.wave.or(defaults.wave).unwrap_or(DEFAULT_WAVE),
+            volume,
+            gap: preset.gap.or(defaults.gap).unwrap_or(DEFAULT_GAP),
         };
     }
 
@@ -363,6 +381,11 @@ fn main() {
 
     if cli.dump_full_config {
         use std::collections::BTreeMap;
+        let defaults = config.as_ref().map(|c| &c.defaults);
+        let def_wave = defaults.and_then(|d| d.wave).unwrap_or(DEFAULT_WAVE);
+        let def_volume = defaults.and_then(|d| d.volume).unwrap_or(DEFAULT_VOLUME);
+        let def_gap = defaults.and_then(|d| d.gap).unwrap_or(DEFAULT_GAP);
+
         let mut presets = BTreeMap::new();
         for &name in BUILTIN_PRESET_NAMES {
             let r = builtin_preset(name).unwrap();
@@ -377,23 +400,39 @@ fn main() {
             for (name, preset) in &cfg.presets {
                 presets.insert(name, PresetConfig {
                     notes: preset.notes.clone(),
-                    wave: preset.wave.or(Some(DEFAULT_WAVE)),
-                    volume: preset.volume.or(Some(DEFAULT_VOLUME)),
-                    gap: preset.gap.or(Some(DEFAULT_GAP)),
+                    wave: Some(preset.wave.unwrap_or(def_wave)),
+                    volume: Some(preset.volume.unwrap_or(def_volume)),
+                    gap: Some(preset.gap.unwrap_or(def_gap)),
                 });
             }
         }
-        let wrapper = HashMap::from([("presets", presets)]);
-        print!("{}", toml::to_string_pretty(&wrapper).expect("failed to serialize config"));
+
+        #[derive(Serialize)]
+        struct FullConfig<'a> {
+            defaults: Defaults,
+            presets: BTreeMap<&'a str, PresetConfig>,
+        }
+        let full = FullConfig {
+            defaults: Defaults {
+                wave: Some(def_wave),
+                volume: Some(def_volume),
+                gap: Some(def_gap),
+            },
+            presets,
+        };
+        print!("{}", toml::to_string_pretty(&full).expect("failed to serialize config"));
         return;
     }
 
+    let defaults = config.as_ref().map(|c| &c.defaults);
     let base = match (cli.preset.as_deref(), cli.notes.is_empty()) {
         (Some(_), false) => fatal("cannot use both --preset and positional notes"),
         (Some(name), true) => resolve_preset(name, config.as_ref()),
         (None, false) => ResolvedPreset {
             notes: cli.notes,
-            ..Default::default()
+            wave: defaults.and_then(|d| d.wave).unwrap_or(DEFAULT_WAVE),
+            volume: defaults.and_then(|d| d.volume).unwrap_or(DEFAULT_VOLUME),
+            gap: defaults.and_then(|d| d.gap).unwrap_or(DEFAULT_GAP),
         },
         (None, true) => fatal("provide notes or --preset"),
     };
