@@ -42,6 +42,18 @@ struct Cli {
     /// Path to config file
     #[arg(long)]
     config: Option<PathBuf>,
+
+    /// Show which config file is loaded and exit
+    #[arg(long)]
+    show_config: bool,
+
+    /// Show effective settings and exit
+    #[arg(long)]
+    show_effective: bool,
+
+    /// Dump effective settings as TOML config and exit
+    #[arg(long)]
+    dump_config: bool,
 }
 
 #[derive(Clone, Copy, ValueEnum, Deserialize)]
@@ -51,6 +63,23 @@ enum Waveform {
     Triangle,
     Square,
     Sawtooth,
+}
+
+impl Waveform {
+    fn as_str(self) -> &'static str {
+        match self {
+            Waveform::Sine => "sine",
+            Waveform::Triangle => "triangle",
+            Waveform::Square => "square",
+            Waveform::Sawtooth => "sawtooth",
+        }
+    }
+}
+
+impl std::fmt::Display for Waveform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 // --- Config ---
@@ -307,7 +336,17 @@ fn resolve_preset(name: &str, config: Option<&Config>) -> ResolvedPreset {
 fn main() {
     let cli = Cli::parse();
 
-    let config = find_config(cli.config.as_deref()).map(|p| load_config(&p));
+    let config_path = find_config(cli.config.as_deref());
+
+    if cli.show_config {
+        match &config_path {
+            Some(p) => println!("{}", p.display()),
+            None => println!("no config file found"),
+        }
+        return;
+    }
+
+    let config = config_path.map(|p| load_config(&p));
 
     if cli.preset.is_some() && !cli.notes.is_empty() {
         fatal("cannot use both --preset and positional notes");
@@ -330,6 +369,25 @@ fn main() {
     let wave = cli.wave.unwrap_or(base.wave);
     let volume = cli.volume.unwrap_or(base.volume);
     let gap = cli.gap.unwrap_or(base.gap);
+
+    if cli.show_effective {
+        println!("notes:  {}", base.notes.join(" "));
+        println!("wave:   {wave}");
+        println!("volume: {volume}");
+        println!("gap:    {gap}ms");
+        return;
+    }
+
+    if cli.dump_config {
+        let preset_name = cli.preset.as_deref().unwrap_or("current");
+        println!("[presets.{preset_name}]");
+        let notes_toml: Vec<String> = base.notes.iter().map(|n| format!("\"{n}\"")).collect();
+        println!("notes = [{}]", notes_toml.join(", "));
+        println!("wave = \"{wave}\"");
+        println!("volume = {volume}");
+        println!("gap = {gap}");
+        return;
+    }
 
     if !(0.0..=1.0).contains(&volume) {
         fatal(&format!("volume must be between 0.0 and 1.0, got {volume}"));
