@@ -15,6 +15,11 @@ const SAMPLE_RATE: u32 = 48000;
 const SAMPLE_RATE_NZ: NonZero<u32> = NonZero::new(SAMPLE_RATE).unwrap();
 const CHANNELS: NonZero<u16> = NonZero::new(1).unwrap();
 
+fn fatal(msg: &str) -> ! {
+    eprintln!("error: {msg}");
+    std::process::exit(1);
+}
+
 // --- CLI ---
 
 #[derive(Parser)]
@@ -128,18 +133,10 @@ fn find_config(explicit: Option<&Path>) -> Option<PathBuf> {
 }
 
 fn load_config(path: &Path) -> Config {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(e) => {
-            fatal(&format!("failed to read config {}: {e}", path.display()));
-        }
-    };
-    match toml::from_str(&content) {
-        Ok(c) => c,
-        Err(e) => {
-            fatal(&format!("failed to parse config {}: {e}", path.display()));
-        }
-    }
+    let content = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| fatal(&format!("failed to read config {}: {e}", path.display())));
+    toml::from_str(&content)
+        .unwrap_or_else(|e| fatal(&format!("failed to parse config {}: {e}", path.display())))
 }
 
 // --- Note parsing ---
@@ -176,11 +173,6 @@ fn note_name_to_semitone(name: &str) -> Option<(i32, usize)> {
         _ => return None,
     };
     Some((s, 1))
-}
-
-fn fatal(msg: &str) -> ! {
-    eprintln!("error: {msg}");
-    std::process::exit(1);
 }
 
 fn parse_note(s: &str) -> Note {
@@ -221,6 +213,7 @@ struct ToneSource {
     sample_i: u32,
     frequency: f32,
     duration_samples: u32,
+    duration_ms: u64,
     waveform: Waveform,
     volume: f32,
     decay_rate: f32,
@@ -234,6 +227,7 @@ impl ToneSource {
             sample_i: 0,
             frequency: freq,
             duration_samples,
+            duration_ms,
             waveform,
             volume,
             decay_rate: 5.0 / duration_secs,
@@ -250,16 +244,14 @@ impl Iterator for ToneSource {
         }
 
         let t = self.sample_i as f32 / SAMPLE_RATE as f32;
-        let phase = 2.0 * std::f32::consts::PI * self.frequency * t;
+        let ft = self.frequency * t;
+        let phase = 2.0 * std::f32::consts::PI * ft;
 
         let wave = match self.waveform {
             Waveform::Sine => phase.sin(),
-            Waveform::Triangle => {
-                let p = self.frequency * t;
-                4.0 * (p - (p + 0.75).floor() + 0.25).abs() - 1.0
-            }
+            Waveform::Triangle => 4.0 * (ft - (ft + 0.75).floor() + 0.25).abs() - 1.0,
             Waveform::Square => phase.sin().signum(),
-            Waveform::Sawtooth => 2.0 * (self.frequency * t - (self.frequency * t + 0.5).floor()),
+            Waveform::Sawtooth => 2.0 * (ft - (ft + 0.5).floor()),
         };
 
         let envelope = (-self.decay_rate * t).exp();
@@ -283,9 +275,7 @@ impl Source for ToneSource {
     }
 
     fn total_duration(&self) -> Option<Duration> {
-        Some(Duration::from_millis(
-            self.duration_samples as u64 * 1000 / SAMPLE_RATE as u64,
-        ))
+        Some(Duration::from_millis(self.duration_ms))
     }
 }
 
@@ -331,6 +321,11 @@ fn resolve_preset(name: &str, config: Option<&Config>) -> ResolvedPreset {
     {
         if preset.notes.is_empty() {
             fatal(&format!("preset '{name}' has no notes"));
+        }
+        if let Some(v) = preset.volume
+            && !(0.0..=1.0).contains(&v)
+        {
+            fatal(&format!("preset '{name}': volume must be between 0.0 and 1.0, got {v}"));
         }
         return ResolvedPreset {
             notes: preset.notes.clone(),
