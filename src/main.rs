@@ -59,6 +59,10 @@ struct Cli {
     /// Dump effective settings as TOML config and exit
     #[arg(long)]
     dump_config: bool,
+
+    /// Dump all presets (built-in + config) as TOML and exit
+    #[arg(long)]
+    dump_full_config: bool,
 }
 
 #[derive(Clone, Copy, ValueEnum, Deserialize, Serialize)]
@@ -299,6 +303,8 @@ impl Default for ResolvedPreset {
     }
 }
 
+const BUILTIN_PRESET_NAMES: &[&str] = &["start", "goal", "success", "fail", "reminder"];
+
 fn builtin_preset(name: &str) -> Option<ResolvedPreset> {
     let (notes, wave) = match name {
         "start" => (vec!["C5", "G5"], DEFAULT_WAVE),
@@ -354,6 +360,33 @@ fn main() {
     }
 
     let config = config_path.map(|p| load_config(&p));
+
+    if cli.dump_full_config {
+        use std::collections::BTreeMap;
+        let mut presets = BTreeMap::new();
+        for &name in BUILTIN_PRESET_NAMES {
+            let r = builtin_preset(name).unwrap();
+            presets.insert(name, PresetConfig {
+                notes: r.notes,
+                wave: Some(r.wave),
+                volume: Some(r.volume),
+                gap: Some(r.gap),
+            });
+        }
+        if let Some(cfg) = &config {
+            for (name, preset) in &cfg.presets {
+                presets.insert(name, PresetConfig {
+                    notes: preset.notes.clone(),
+                    wave: preset.wave.or(Some(DEFAULT_WAVE)),
+                    volume: preset.volume.or(Some(DEFAULT_VOLUME)),
+                    gap: preset.gap.or(Some(DEFAULT_GAP)),
+                });
+            }
+        }
+        let wrapper = HashMap::from([("presets", presets)]);
+        print!("{}", toml::to_string_pretty(&wrapper).expect("failed to serialize config"));
+        return;
+    }
 
     let base = match (cli.preset.as_deref(), cli.notes.is_empty()) {
         (Some(_), false) => fatal("cannot use both --preset and positional notes"),
