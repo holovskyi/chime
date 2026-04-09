@@ -1,7 +1,17 @@
 [package]
-name = "chime"
+name = "chime-cli"
 version = "0.1.0"
 edition = "2024"
+description = "CLI utility for playing musical tones through the sound card — for shell automations and Claude Code hooks."
+license = "MIT"
+repository = "https://github.com/holovskyi/chime"
+readme = "README.md"
+keywords = ["audio", "cli", "tone", "claude-code", "ai-agent"]
+categories = ["command-line-utilities", "multimedia::audio"]
+
+[[bin]]
+name = "chime"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.6.0", features = ["derive"] }

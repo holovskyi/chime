@@ -5,12 +5,16 @@ CLI utility for playing musical tones through the sound card. Designed for integ
 ## Installation
 
 ```bash
-cargo install --git https://github.com/holovskyi/chime
+cargo install chime-cli
 ```
 
-Or build from source:
+The crate is published as `chime-cli` (the name `chime` was already taken on crates.io), but it installs a binary called `chime`.
+
+Or from git / source:
 
 ```bash
+cargo install --git https://github.com/holovskyi/chime
+# or
 git clone https://github.com/holovskyi/chime
 cd chime
 cargo install --path .
@@ -44,13 +48,17 @@ chime --preset reminder   # A4 — notification
 
 ### Options
 
-| Flag       | Default | Description                    |
-|------------|---------|--------------------------------|
-| `--wave`   | sine    | Waveform: sine, triangle, square, sawtooth |
-| `--volume` | 0.3     | Volume 0.0-1.0                 |
-| `--gap`    | 150     | Gap between note starts (ms)   |
-| `--preset` | -       | Named preset instead of notes  |
-| `--config` | -       | Explicit path to config file   |
+| Flag                 | Default | Description                                |
+|----------------------|---------|--------------------------------------------|
+| `--wave`             | sine    | Waveform: sine, triangle, square, sawtooth |
+| `--volume`           | 0.3     | Volume 0.0-1.0                             |
+| `--gap`              | 150     | Gap between note starts (ms)               |
+| `--preset`           | -       | Named preset instead of notes              |
+| `--config`           | -       | Explicit path to config file               |
+| `--show-config`      | -       | List config search paths and which file is loaded, then exit |
+| `--show-effective`   | -       | Print resolved settings for the invocation and exit |
+| `--dump-config`      | -       | Print current effective settings as a TOML preset block and exit |
+| `--dump-full-config` | -       | Print all built-in + config presets (with `[defaults]`) as TOML and exit |
 
 ### Note format
 
@@ -70,17 +78,34 @@ Chime looks for a TOML config file to load custom presets. Discovery order (firs
 Example config:
 
 ```toml
+[defaults]
+volume = 0.5
+wave = "triangle"
+# gap = 200          # optional
+
 [presets.my-chord]
 notes = ["A4:200", "C5:200", "E5:200", "A5:400"]
-wave = "triangle"
-volume = 0.5
-gap = 100
+gap = 100            # overrides the [defaults] gap
+# wave/volume inherited from [defaults]
 
-[presets.success]   # overrides the built-in preset
+[presets.success]    # overrides the built-in preset
 notes = ["C6:300", "E6:300", "G6:300"]
 ```
 
-Preset fields: `notes` (required), `wave` / `volume` / `gap` (optional, defaults apply). CLI flags always override config values.
+Preset fields: `notes` (required), `wave` / `volume` / `gap` (optional). The `[defaults]` section sets `wave` / `volume` / `gap` shared by all custom presets and bare-notes invocations.
+
+**Precedence (first set wins):** CLI flag → preset field → `[defaults]` → built-in default (sine, 0.3, 150ms).
+
+Built-in presets (`start`, `goal`, `success`, `fail`, `reminder`) keep their own hardcoded values and are not affected by `[defaults]`. To customize them, define a preset with the same name in your config file.
+
+### Inspecting configuration
+
+```bash
+chime --show-config             # show search paths + loaded file
+chime --preset success --show-effective    # resolved notes/wave/volume/gap
+chime --preset success --dump-config       # one preset as TOML
+chime --dump-full-config        # all presets + [defaults] as TOML
+```
 
 ## Claude Code hooks integration
 
